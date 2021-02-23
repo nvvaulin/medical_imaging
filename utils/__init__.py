@@ -1,0 +1,1 @@
+from .load_object import load_from_config,config_name

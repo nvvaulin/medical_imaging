@@ -41,14 +41,20 @@ def set_up_loging(exp_path,_config,_run,loglevel='INFO'):
 @ex.config
 def config():
     exp_root='exps'
-    exp_name='multilabel'
+    exp_name='resampling_covid1_pretrained_chexpert'
     version = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    load_epoch='best'
+    sampler = {'WeightedClassRandomSampler':{'names_weights': {1/15.,7/15.,7/15.}}}
     exp_path = os.path.join(exp_root,exp_name,version)
-    optimizer = dict(name='SGD',params={'lr':0.01,'momentum':0.9,'weight_decay':1e-4})
-
-    scheduler = dict(name='ReduceLROnPlateau',params={'factor':0.3,'patience':5,'min_lr':1e-5,'verbose':True})
-    # scheduler = dict(name='MultiStepLR',params={'gamma':0.1,'milestones':[]})
-    dataset = dict(name='ChestXRay',params={'reduce_size':(256,256)})#'Coronahack')
+    # optimizer = dict(SGD={'lr':0.01,'momentum':0.9,'weight_decay':1e-4})
+    optimizer = dict(Adam={'lr':1e-4,'betas':(0.9, 0.999)})
+    unfreeze_epoch = 1
+    # scheduler = dict(ReduceLROnPlateau={'factor':0.3,'patience':5,'min_lr':1e-5,'verbose':True})
+    scheduler = dict(MultiStepLR={'gamma':0.1,'milestones':[1000,  5000,10000]})
+    dataset = [dict(ChestXRay={'reduce_size':(256,256)}),
+               dict(Coronahack={'reduce_size':(256,256)}),
+               dict(CovidChestXRay={'reduce_size':(256,256)})]#'Coronahack')
+    use_names = ['No Finding','COVID-19','Pneumonia']
     batch_size = 16
     input_size = (224,224)
 
@@ -57,7 +63,8 @@ def config():
         gpus=1,
         max_epochs=100,
     )
-    backbone = dict(name = 'densenet121',params={'pretrained':True})
+    backbone = dict(densenet121={'pretrained':False,'num_classes':14})
+    pretrained_backbone = '../chexnet_model.pth.tar'
 
 
 # def load_config(exp_name,config_path='config.yml',exp_root='exps',loglevel='INFO'):
