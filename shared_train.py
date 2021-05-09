@@ -1,4 +1,4 @@
-from config import ex
+from shared_config import ex
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import EarlyStopping
 import models
@@ -12,8 +12,65 @@ from utils import load_from_config,config_name
 import torch
 from utils import samplers
 import numpy as np
+from torch.utils.data import SequentialSampler,RandomSampler
+from torch import nn
+import torch
+import re
+
+def assign_parameter(model,name,param):
+    names = name.split('.')
+    for i in names[:-1]:
+        model = model.__getattr__(i)
+    model.__setattr__(names[-1],param)
+    
+class SharedModel(nn.Module):
+    def __init__(self,model1,model2,shared_param_mask,**kwargs):
+        super().__init__(**kwargs)
+        share_params = []
+        for n,p in model1.named_parameters():
+            if re.match(shared_param_mask,n):
+                share_params.append(n)
+                assign_parameter(model2,n,p)
+        self.model1 = model1
+        self.model2 = model2
+        
+    def forward(self,x):
+        if self.training:
+            size = x.shape[0]//2
+            x1,x2 = tuple(torch.split(x,[size,size]))
+            return torch.cat([self.model1(x1),self.model2(x2)])
+        else:
+            return self.model2(x)
 
 
+class MultyDatasetBatchSampler:
+    def __init__(self,dataset,batch_size,shuffle=True,sampler=None,label_names=None):
+        assert batch_size% len(dataset.datasets)==0,'wrong!'
+        self.offsets = np.array(dataset.offsets)
+        lo,hi = dataset.offsets,dataset.offsets[1:]+[None]
+        if sampler is None:
+            if shuffle:
+                self.samplers = [RandomSampler(i) for i in dataset.datasets]
+            else:
+                self.samplers = [SequentialSampler(i) for i in dataset.datasets]
+        else:
+            self.samplers = [load_from_config(sampler, samplers)(labels=dataset.labels[l:h],
+                                                                 label_names=dataset.label_names) for l,h in zip(lo,hi)]
+        self.batch_size = batch_size
+    
+    def __iter__(self):
+        batch = []
+        for idx in zip(*self.samplers):
+            batch.append(idx)
+            if len(batch) == self.batch_size//len(self.samplers):
+                batch = (np.array(batch)+self.offsets[None,:]).transpose().flatten()
+                yield list(batch)
+                batch = []
+
+    def __len__(self) -> int:
+        return min([len(i) for i in self.samplers])//(self.batch_size//len(self.samplers))
+        
+@ex.capture
 def load_dataset(dataset, mode, sampler=None,batch_size=64,input_size=(224,224),num_workers=8,reduce_size=None,label_names=None):
     mean = [0.485, 0.456, 0.406]
     std = [0.229, 0.224, 0.225]
@@ -34,15 +91,10 @@ def load_dataset(dataset, mode, sampler=None,batch_size=64,input_size=(224,224),
     if not isinstance(dataset,list):
         dataset = [dataset]
     dataset = [load_from_config(i,datasets)(mode=mode,transform=transform,reduce_size=reduce_size) for i in dataset]
+    dsizes = [len(i) for i in dataset]
     dataset = datasets.JoinDatasets(dataset,use_names=label_names)
-    if not (sampler is None):
-        sampler = load_from_config(sampler, samplers)(labels=dataset.labels,
-                                                      label_names=dataset.label_names)
-    if mode=='train' and (sampler is None):
-        loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,shuffle=True)
-    else:
-        loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers,sampler=sampler)
-
+    batch_sampler = MultyDatasetBatchSampler(dataset,batch_size,shuffle=(mode=='train'),sampler=sampler,label_names=label_names)
+    loader = DataLoader(dataset,batch_sampler=batch_sampler, num_workers=num_workers)
     return loader,dataset
 
 
@@ -51,28 +103,39 @@ def load_dataset(dataset, mode, sampler=None,batch_size=64,input_size=(224,224),
 
 
 @ex.capture
-def load_train_val_test(dataset=None,train_dataset=None,val_dataset=None,test_dataset=None,sampler=None,
-                        batch_size=64, input_size=(224, 224), num_workers=8, label_names=None,reduce_size=None):
-    train = load_dataset(train_dataset or dataset,mode='train',sampler=sampler,batch_size=batch_size,input_size=input_size,num_workers=num_workers,label_names=label_names,reduce_size=reduce_size)
+def load_train_val_test(dataset=None,train_dataset=None,val_dataset=None,test_dataset=None,sampler=None,label_names=None):
+    
+    train = load_dataset(train_dataset or dataset,mode='train',sampler=sampler,label_names=label_names)
     if label_names is None:
         label_names = train[1].label_names
-    val = load_dataset(val_dataset or dataset,mode='val',batch_size=batch_size,input_size=input_size,num_workers=num_workers,label_names=label_names,reduce_size=reduce_size)
+    val = load_dataset(val_dataset or dataset,mode='val',label_names=label_names,sampler=None)
     test_dataset = test_dataset or dataset
     if not isinstance(test_dataset,list):
         test_dataset = [test_dataset]
-    test = [load_dataset(i,mode='test',batch_size=batch_size,input_size=input_size,num_workers=num_workers,label_names=label_names,reduce_size=reduce_size) for i in test_dataset]
+    test = [load_dataset(i,mode='test',label_names=label_names,sampler=None) for i in test_dataset]
 
     number_of_samples = np.concatenate([(i[1].labels==1).sum(0)[:,None] for i in [train,val,*test]],1)
     print('\n'.join(['{:15s} | '.format(n)+' | '.join(['{:6d}'.format(i) for i in c]) for n,c in zip(label_names,number_of_samples)]))
     return label_names, train[0],val[0],[i[0] for i in test]
 
 
-
-@ex.capture
-def load_model(label_names,optimizer,scheduler,backbone,unfreeze_epoch=0,pretrained_backbone=None):
+def load_backdone(label_names,backbone,shared_param_mask,pretrained_backbone):
     backbone = load_from_config(backbone,models)()
     if not (pretrained_backbone is None):
         backbone.load_state_dict(torch.load(pretrained_backbone)['state_dict'],strict=True)
+    
+    if hasattr(backbone,'classifier'):
+        backbone.classifier = nn.Sequential(nn.Linear(backbone.classifier.in_features, len(label_names)), nn.Sigmoid())
+    else:
+        backbone.fc= nn.Sequential(nn.Linear(self.backbone.fc.in_features, len(label_names)), nn.Sigmoid())
+    return backbone
+    
+@ex.capture
+def load_model(label_names,optimizer,scheduler,backbone,shared_param_mask,unfreeze_epoch=0,pretrained_backbone=None):
+    backbone1 = load_backdone(label_names,backbone,shared_param_mask,pretrained_backbone)
+    backbone2 = load_backdone(label_names,backbone,shared_param_mask,pretrained_backbone)        
+    backbone = SharedModel(backbone1,backbone2,shared_param_mask)
+    
     optimizer =  load_from_config(optimizer,torch.optim)
     lr_scheduler = load_from_config(scheduler,torch.optim.lr_scheduler)
     model = models.BasicClassifierModel(backbone, label_names, optimizer, lr_scheduler,unfreeze_epoch=unfreeze_epoch)

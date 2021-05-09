@@ -27,17 +27,20 @@ class JoinDatasets(datasets.VisionDataset):
     def _join_labels(self,labels,label_names,use_names=None):
         dinx = [np.arange(len(l)) for l in labels]
         if not use_names is None:
-            use_names = set(use_names)
-            masks = [np.array([i in use_names for i in j]) for j in label_names]
+            use_names = np.array(use_names)
+            s_use_names = set(use_names)
+            masks = [np.array([i in s_use_names for i in j]) for j in label_names]
             labels = [l[:,m] for m,l in zip(masks,labels)]
             label_names = [n[m] for m,n in zip(masks,label_names)]
             dinx = [i[l.max(1) > .99] for i,l in zip(dinx,labels)]
             labels = [l[l.max(1) > .99] for l in labels]
-        unames,inx = np.unique(np.concatenate(label_names),return_inverse=True)
-        res = np.zeros((sum([len(i) for i in labels]),len(unames)),dtype=labels[0].dtype)+0.5
-        i,j = 0,0        
+        else:
+            use_names = np.unique(np.concatenate(label_names))
+        res = np.zeros((sum([len(i) for i in labels]),len(use_names)),dtype=labels[0].dtype)
+        i = 0
         for l,n in zip(labels,label_names):
-            res[i:i+len(l),inx[j:j+len(n)]] = l
+            inx = np.argsort(use_names)
+            inx = inx[np.searchsorted(use_names[inx],n)]
+            res[i:i+len(l),inx] = l
             i+=len(l)
-            j+=len(n)
-        return res, dinx, unames
+        return res, dinx, use_names

@@ -19,10 +19,10 @@ class BasicClassifierModel(pl.LightningModule):
         self.backbone = backbone
         self.num_classes = len(class_names)
 
-        if hasattr(self.backbone,'classifier'):
-            self.backbone.classifier = nn.Sequential(nn.Linear(self.backbone.classifier.in_features, self.num_classes), nn.Sigmoid())
-        else:
-            self.backbone.fc= nn.Sequential(nn.Linear(self.backbone.fc.in_features, self.num_classes), nn.Sigmoid())
+#         if hasattr(self.backbone,'classifier'):
+#             self.backbone.classifier = nn.Sequential(nn.Linear(self.backbone.classifier.in_features, self.num_classes), nn.Sigmoid())
+#         else:
+#             self.backbone.fc= nn.Sequential(nn.Linear(self.backbone.fc.in_features, self.num_classes), nn.Sigmoid())
         self.loss = nn.BCELoss(reduction='none')
         self.class_names = class_names
 
@@ -56,19 +56,22 @@ class BasicClassifierModel(pl.LightningModule):
                 names.append(name)
         print('unfreeze paremeters: %s'%','.join(names))
 
-    # def on_epoch_start(self):
-    #     if self.current_epoch == 0:
-    #         print('freeze model')
-    #         self.freeze()
-    #         self.train(True)
-    #         self.unfreeze_mask('.*classifier.*')
-    #     if self.current_epoch == self.unfreeze_epoch:
-    #         print('unfreeze model')
-    #         self.unfreeze()  # Or partially unfreeze
+    def on_epoch_start(self):
+        if self.current_epoch == 0:
+            print('freeze model')
+            self.freeze()
+            self.train(True)
+            self.unfreeze_mask('.*classifier.*')
+        if self.current_epoch == self.unfreeze_epoch:
+            print('unfreeze model')
+            self.unfreeze()  # Or partially unfreeze
+            self.freeze_mask('.*conv.*weight')
 
     def _epoch_end(self,type,outputs):
         pred = np.concatenate([i['pred'].cpu().numpy() for i in outputs],0)
         target = np.concatenate([i['target'].cpu().numpy() for i in outputs],0)
+        avg_auc = []
+        avg_tpr = []
         for i,n in enumerate(self.class_names):
             n = n.replace(' ','_')
             mask = np.abs(target[:,i]-0.5)>0.1
@@ -80,11 +83,20 @@ class BasicClassifierModel(pl.LightningModule):
             fpr,tpr,_ = roc_curve(t,p)
             fig = plt.figure(figsize=(10,10))
             roc_auc = roc_auc_score(t,p)
+            avg_auc.append(roc_auc)
+            avg_tpr.append(tpr[np.searchsorted(fpr,1e-3)])
             self.log('%s_%s_auc'%(type,n), roc_auc)
-            self.log('%s_%s_tpr'%(type,n), tpr[np.searchsorted(fpr,1e-2)])
+            self.log('%s_%s_tpr'%(type,n), tpr[np.searchsorted(fpr,1e-3)])
             plt.semilogx(fpr,tpr,label='ep-%d;roc_auc-%.2f'%(self.current_epoch,roc_auc))
             self.logger.experiment.add_figure('%s_%s_roc%d'%(type,n,self.current_epoch),fig)
-            print('%s %s auc: %.3f;  tpr@1e-3: %.3f'%(type,n,roc_auc,tpr[np.searchsorted(fpr,1e-2)]))
+            print('%s %s auc: %.3f;  tpr@1e-3: %.3f'%(type,n,roc_auc,tpr[np.searchsorted(fpr,1e-3)]))
+
+        n = 'avg'
+        avg_auc = np.array(avg_auc).mean()
+        avg_tpr = np.array(avg_tpr).mean()
+        print('%s %s auc: %.3f;  tpr@1e-3: %.3f'%(type,n,avg_auc,avg_tpr))
+        self.log('%s_%s_auc'%(type,n), avg_auc  )
+        self.log('%s_%s_tpr'%(type,n), avg_tpr)
 
 
     def training_step(self, batch, batch_idx):

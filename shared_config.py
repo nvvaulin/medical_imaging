@@ -41,7 +41,7 @@ def set_up_loging(exp_path,_config,_run,loglevel='INFO'):
 @ex.config
 def config():
     exp_root='exps'
-    exp_name='densenet_chest_covid'
+    exp_name='densenet_chest_covid_shared_nothing_bs16'
     version = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     load_epoch='best'
     sampler = {'WeightedClassRandomSampler':{'names_weights': {'No Finding':0.1,'Pneumonia':0.1}}}
@@ -52,10 +52,13 @@ def config():
     scheduler = dict(ReduceLROnPlateau={'factor':0.3,'patience':2,'min_lr':1e-4,'verbose':True})
     # scheduler = dict(MultiStepLR={'gamma':0.1,'milestones':[1000,  5000,10000]})
     dataset = ['ChestXRay','CovidChestXRay']
+    val_dataset = 'CovidChestXRay'
+    test_dataset = 'CovidChestXRay'
     # label_names = ['No Finding','COVID-19','Pneumonia']
     reduce_size = (256,256)
-    batch_size = 16
+    batch_size = 16*2
     input_size = (224,224)
+    shared_param_mask = 'nothing'
 
     trainer = dict(
         auto_select_gpus=True,
