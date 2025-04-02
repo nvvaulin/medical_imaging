@@ -1,2 +1,2 @@
 # medical_imaging
-medical_imaging project
+medical_imaging
